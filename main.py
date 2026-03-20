@@ -27,8 +27,8 @@ if not BOT_TOKEN:
     logger.error("BOT_TOKEN environment variable is required!")
     exit(1)
 
-GUILD_ID = int(os.getenv('GUILD_ID', '1470597286269550592'))
-VOICE_CHANNEL_ID = int(os.getenv('VOICE_CHANNEL_ID', '1470597286269550592'))
+GUILD_ID = int(os.getenv('GUILD_ID', '1289789596238086194'))
+VOICE_CHANNEL_ID = int(os.getenv('VOICE_CHANNEL_ID', '1470597286269550592'))  # Confirmed VC
 WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID', '1470597378116681812'))
 allowed_role_str = os.getenv('ALLOWED_ROLE_IDS', '1470596832794251408,1470596825575854223,1470596818298601567')
 ALLOWED_ROLE_IDS = [int(rid.strip()) for rid in allowed_role_str.split(',')]
