@@ -3,23 +3,57 @@ from nextcord.ext import commands, tasks
 import os
 from dotenv import load_dotenv
 import flask
-from threading import Thread
+import logging
+import time
+import threading
 import asyncio
+import signal
 
 load_dotenv()
 
-# Config
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Configuration with env vars and fallbacks
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-VOICE_CHANNEL_ID = 1470597286269550592
-WELCOME_CHANNEL_ID = 1470597378116681812
-ALLOWED_ROLE_IDS = [1470596832794251408, 1470596825575854223, 1470596818298601567]
-GUILD_ID = 1470597286269550592  # Assumed from voice ch ID; adjust if needed
-EMOJI_BADGE = '<:Welcome0:1484564259395604572><:Welcome1:1484564289309380780><:Welcome2:1484564315888681000><:Welcome3:1484564376995234037>'
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN environment variable is required!")
+    exit(1)
+
+GUILD_ID = int(os.getenv('GUILD_ID', '1470597286269550592'))
+VOICE_CHANNEL_ID = int(os.getenv('VOICE_CHANNEL_ID', '1470597286269550592'))
+WELCOME_CHANNEL_ID = int(os.getenv('WELCOME_CHANNEL_ID', '1470597378116681812'))
+allowed_role_str = os.getenv('ALLOWED_ROLE_IDS', '1470596832794251408,1470596825575854223,1470596818298601567')
+ALLOWED_ROLE_IDS = [int(rid.strip()) for rid in allowed_role_str.split(',')]
+EMOJI_BADGE = os.getenv('EMOJI_BADGE', '<:Welcome0:1484564259395604572><:Welcome1:1484564289309380780><:Welcome2:1484564315888681000><:Welcome3:1484564376995234037>')
+
+if os.getenv('GUILD_ID') is None:
+    logger.warning("Using hardcoded GUILD_ID - set env var for flexibility.")
 
 intents = nextcord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix='>', intents=intents)
+
+# Cache for human count
+human_cache = {'count': 0, 'timestamp': 0}
+CACHE_DURATION = 300  # 5 minutes
+
+def get_human_count(guild):
+    import time
+    now = time.time()
+    if now - human_cache['timestamp'] < CACHE_DURATION:
+        return human_cache['count']
+    count = len([m for m in guild.members if not m.bot])
+    human_cache.update({'count': count, 'timestamp': now})
+    return count
 
 def get_ordinal(n):
     if 11 <= (n % 100) <= 13:
@@ -28,23 +62,39 @@ def get_ordinal(n):
         suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
     return f"{n}{suffix}"
 
-def get_human_count(guild):
-    return len([m for m in guild.members if not m.bot])
-
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has logged in.')
+    logger.info(f'{bot.user} (ID: {bot.user.id}) has logged in!')
+    logger.info(f'Connected to {len(bot.guilds)} guilds.')
     try:
-        synced = await bot.sync_application_commands(guild=nextcord.Object(id=GUILD_ID))
-        print(f'Synced {len(synced)} command(s)')
+        synced = await bot.tree.sync(guild=nextcord.Object(id=GUILD_ID))
+        logger.info(f'Synced {len(synced)} application command(s)')
     except Exception as e:
-        print(e)
+        logger.error(f'Application command sync failed: {e}')
+    # Set visible presence
+    activity = nextcord.Activity(
+        type=nextcord.ActivityType.watching, 
+        name="Liberty County State Roleplay | /say"
+    )
+    await bot.change_presence(activity=activity, status=nextcord.Status.online)
     update_voice_channel.start()
+    logger.info("Bot fully ready and tasks started!")
+
+@bot.event
+async def on_error(event: str, *args, **kwargs):
+    logger.error(f"On_error triggered for event '{event}':", exc_info=True)
+
+@bot.tree.error
+async def on_app_command_error(interaction: nextcord.Interaction, error: nextcord.AppCommandError):
+    logger.error(f"Slash command error: {error}", exc_info=True)
+    if interaction.response.is_done():
+        return
+    await interaction.response.send_message("An error occurred!", ephemeral=True)
 
 @bot.slash_command(guild_ids=[GUILD_ID], description='Say a message as the bot')
 async def say(interaction: nextcord.Interaction, message: str):
     if not any(role.id in ALLOWED_ROLE_IDS for role in interaction.user.roles):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.send_message("❌ Insufficient permissions!", ephemeral=True)
         return
     await interaction.response.defer()
     await interaction.channel.send(message)
@@ -68,7 +118,7 @@ async def on_message(message):
 async def on_member_join(member):
     guild = member.guild
     channel = bot.get_channel(WELCOME_CHANNEL_ID)
-    if channel:
+    if channel is not None:
         human_count = get_human_count(guild)
         ordinal = get_ordinal(human_count)
         welcome_msg = f"{EMOJI_BADGE} {member.mention} **Welcome to Liberty County State Roleplay Community. You are our `{human_count}`{ordinal} member.**\n> Thanks for joining and have a wonderful day."
@@ -77,46 +127,111 @@ async def on_member_join(member):
 @tasks.loop(seconds=600)  # 10 minutes
 async def update_voice_channel():
     guild = bot.get_guild(GUILD_ID)
-    if guild:
-        voice_ch = guild.get_channel(VOICE_CHANNEL_ID)
-        if voice_ch:
-            human_count = get_human_count(guild)
-            new_name = f"(Members: {human_count})"
-            await voice_ch.edit(name=new_name)
+    if guild is None:
+        return
+    voice_ch = guild.get_channel(VOICE_CHANNEL_ID)
+    if voice_ch is None:
+        return
+    human_count = get_human_count(guild)
+    new_name = f"(Members: {human_count})"
+    try:
+        await voice_ch.edit(name=new_name)
+        logger.info(f"Voice channel updated to {new_name}")
+    except nextcord.Forbidden:
+        logger.warning("Missing permissions to edit voice channel")
+    except Exception as e:
+        logger.error(f"Voice channel update failed: {e}")
 
-async def start_bot():
-    max_retries = 10
+async def bot_main():
+    """Main bot runner with retry logic"""
+    logger.info("=== Starting LCSRPC Bot ===")
+    logger.info(f"Target guild: {GUILD_ID}")
+    max_retries = 5
+    backoff = 1
     for attempt in range(max_retries):
         try:
+            logger.info(f"Bot login attempt {attempt + 1}/{max_retries}")
             await bot.start(BOT_TOKEN)
-            return
-        except Exception as e:
-            if '429' in str(e) or '1015' in str(e) or 'rate limited' in str(e).lower():
-                wait_time = (2 ** attempt) * 5
-                print(f'Rate limited (attempt {attempt+1}/{max_retries}). Waiting {wait_time}s...')
+        except nextcord.LoginFailure as e:
+            logger.error(f"Authentication failed: {e}")
+            break
+        except asyncio.TimeoutError:
+            logger.warning("Login timeout, retrying...")
+        except nextcord.HTTPException as e:
+            if e.status == 429 or 'rate limit' in str(e).lower():
+                wait_time = backoff * 5
+                logger.warning(f"Rate limited. Waiting {wait_time}s before retry {attempt + 1}")
+                backoff *= 2
                 await asyncio.sleep(wait_time)
-            else:
-                print(f'Bot error (non-rate-limit): {e}')
-                break
-    print('Max retries exceeded. Bot offline, but Flask server running.')
+                continue
+            logger.error(f"HTTP error during login: {e}")
+            break
+        except Exception as e:
+            logger.exception(f"Unexpected error during bot start: {e}")
+            break
+        # If no exception, login success (won't reach here as start() blocks forever)
+    else:
+        logger.error("Max retries exceeded. Bot could not connect.")
+    logger.info("Bot main ended.")
 
-def run_bot_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_bot())
-    loop.run_forever()
-
-def create_app():
+def create_app() -> flask.Flask:
     app = flask.Flask(__name__)
+    
     @app.route('/')
     def home():
-        return 'Bot is alive!'
+        return {'status': 'alive', 'service': 'LCSRPC Bot + Web'}
+    
+    @app.route('/bot-status')
+    def status():
+        global bot_start_time
+        uptime = time.time() - (bot_start_time or 0) if 'bot_start_time' in globals() else 0
+        is_ready = hasattr(bot, 'is_ready') and bot.is_ready()
+        is_logged_in = hasattr(bot, 'is_logged_in') and bot.is_logged_in()
+        return {
+            'flask_alive': True,
+            'bot_ready': is_ready,
+            'bot_logged_in': is_logged_in,
+            'bot_user': str(bot.user) if is_ready else 'Not ready',
+            'guild_count': len(bot.guilds) if hasattr(bot, 'guilds') else 0,
+            'uptime_seconds': uptime,
+            'cache_human_count': human_cache.get('count', 0)
+        }
+    
     return app
 
-if __name__ == '__main__':
+def run_flask():
+    """Run Flask in thread"""
     port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 Starting Flask web server on port {port}")
     app = create_app()
-    bot_thread = Thread(target=run_bot_thread, daemon=True)
-    bot_thread.start()
-    print('Starting Flask server on port', port)
     app.run(host='0.0.0.0', port=port, debug=False)
+
+if __name__ == '__main__':
+    global bot_start_time
+    bot_start_time = time.time()
+    
+    logger.info("🎯 Liberty County State Roleplay Bot starting...")
+    logger.info(f"Python {os.sys.version}")
+    logger.info(f"Nextcord version: {nextcord.__version__}")
+    
+    # Graceful shutdown
+    loop = asyncio.get_event_loop()
+    
+    def shutdown():
+        logger.info("Received shutdown signal, closing bot...")
+        if not bot.is_closed():
+            loop.run_until_complete(bot.close())
+    
+    signal.signal(signal.SIGINT, lambda s, f: shutdown())
+    signal.signal(signal.SIGTERM, lambda s, f: shutdown())
+    
+    # Start Flask in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Bot runs in main thread (blocks forever, keeps process alive)
+    try:
+        asyncio.run(bot_main())
+    except KeyboardInterrupt:
+        shutdown()
+
