@@ -84,15 +84,39 @@ async def update_voice_channel():
             new_name = f"(Members: {human_count})"
             await voice_ch.edit(name=new_name)
 
-def run_flask():
+async def start_bot():
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            await bot.start(BOT_TOKEN)
+            return
+        except Exception as e:
+            if '429' in str(e) or '1015' in str(e) or 'rate limited' in str(e).lower():
+                wait_time = (2 ** attempt) * 5
+                print(f'Rate limited (attempt {attempt+1}/{max_retries}). Waiting {wait_time}s...')
+                await asyncio.sleep(wait_time)
+            else:
+                print(f'Bot error (non-rate-limit): {e}')
+                break
+    print('Max retries exceeded. Bot offline, but Flask server running.')
+
+def run_bot_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_bot())
+    loop.run_forever()
+
+def create_app():
     app = flask.Flask(__name__)
     @app.route('/')
     def home():
         return 'Bot is alive!'
-    app.run(port=5000, debug=False)
+    return app
 
 if __name__ == '__main__':
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    bot.run(BOT_TOKEN)
+    port = int(os.environ.get('PORT', 10000))
+    app = create_app()
+    bot_thread = Thread(target=run_bot_thread, daemon=True)
+    bot_thread.start()
+    print('Starting Flask server on port', port)
+    app.run(host='0.0.0.0', port=port, debug=False)
