@@ -71,6 +71,15 @@ async def on_ready():
         logger.info(f'Synced {len(synced)} application command(s)')
     except Exception as e:
         logger.error(f'Application command sync failed: {e}')
+    
+    # Add slash command error handler after tree ready
+    async def on_app_command_error(interaction: nextcord.Interaction, error: nextcord.AppCommandError):
+        logger.error(f'Slash command error for {interaction.user}: {error}', exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message('An error occurred while executing the command!', ephemeral=True)
+    
+    bot.tree.error(on_app_command_error)
+    
     # Set visible presence
     activity = nextcord.Activity(
         type=nextcord.ActivityType.watching, 
@@ -83,13 +92,6 @@ async def on_ready():
 @bot.event
 async def on_error(event: str, *args, **kwargs):
     logger.error(f"On_error triggered for event '{event}':", exc_info=True)
-
-@bot.tree.error
-async def on_app_command_error(interaction: nextcord.Interaction, error: nextcord.AppCommandError):
-    logger.error(f"Slash command error: {error}", exc_info=True)
-    if interaction.response.is_done():
-        return
-    await interaction.response.send_message("An error occurred!", ephemeral=True)
 
 @bot.slash_command(guild_ids=[GUILD_ID], description='Say a message as the bot')
 async def say(interaction: nextcord.Interaction, message: str):
@@ -169,7 +171,7 @@ async def bot_main():
         except Exception as e:
             logger.exception(f"Unexpected error during bot start: {e}")
             break
-        # If no exception, login success (won't reach here as start() blocks forever)
+        # Success case not reached due to blocking start()
     else:
         logger.error("Max retries exceeded. Bot could not connect.")
     logger.info("Bot main ended.")
@@ -211,25 +213,27 @@ if __name__ == '__main__':
     bot_start_time = time.time()
     
     logger.info("🎯 Liberty County State Roleplay Bot starting...")
-    logger.info(f"Python {os.sys.version}")
-    logger.info(f"Nextcord version: {nextcord.__version__}")
+    logger.info(f"Python version: {os.sys.version.split()[0]}")
     
-    # Graceful shutdown
-    loop = asyncio.get_event_loop()
-    
-    def shutdown():
-        logger.info("Received shutdown signal, closing bot...")
+    # Graceful shutdown setup
+    def shutdown(sig=None, frame=None):
+        logger.info("Shutdown signal received, closing bot...")
         if not bot.is_closed():
-            loop.run_until_complete(bot.close())
+            # Run close in event loop if possible
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(bot.close())
+            except:
+                asyncio.run(bot.close())
     
-    signal.signal(signal.SIGINT, lambda s, f: shutdown())
-    signal.signal(signal.SIGTERM, lambda s, f: shutdown())
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
     
-    # Start Flask in background thread
+    # Start Flask in daemon thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # Bot runs in main thread (blocks forever, keeps process alive)
+    # Bot runs in main thread (primary process)
     try:
         asyncio.run(bot_main())
     except KeyboardInterrupt:
